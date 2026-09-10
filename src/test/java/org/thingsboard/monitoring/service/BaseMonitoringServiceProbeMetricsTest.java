@@ -673,6 +673,34 @@ public class BaseMonitoringServiceProbeMetricsTest {
         assertThat(resolved).isEmpty();
     }
 
+    @Test
+    public void flattenHealthCheckers_singleTopLevelNoAssociates_returnsJustIt() {
+        List<Object> flattened = (List<Object>) ReflectionTestUtils.invokeMethod(service, "flattenHealthCheckers");
+
+        assertThat(flattened).containsExactly(healthChecker);
+    }
+
+    @Test
+    public void flattenHealthCheckers_includesAssociatesRightAfterTheirParent() {
+        BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> associate = mock(BaseHealthChecker.class);
+        when(healthChecker.getAssociates()).thenReturn(Map.of("associate-url", associate));
+
+        List<Object> flattened = (List<Object>) ReflectionTestUtils.invokeMethod(service, "flattenHealthCheckers");
+
+        assertThat(flattened).containsExactlyInAnyOrder(healthChecker, associate);
+        assertThat(flattened).hasSize(2);
+    }
+
+    @Test
+    public void flattenHealthCheckers_recomputedFresh_reflectsAssociatesAddedSinceLastCall() {
+        assertThat((List<?>) ReflectionTestUtils.invokeMethod(service, "flattenHealthCheckers")).hasSize(1);
+
+        BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> associate = mock(BaseHealthChecker.class);
+        when(healthChecker.getAssociates()).thenReturn(Map.of("associate-url", associate));
+
+        assertThat((List<?>) ReflectionTestUtils.invokeMethod(service, "flattenHealthCheckers")).hasSize(2);
+    }
+
     private static class TestMonitoringService extends BaseMonitoringService<TransportMonitoringConfig, TransportMonitoringTarget> {
         @Override
         protected BaseHealthChecker<?, ?> createHealthChecker(TransportMonitoringConfig config, TransportMonitoringTarget target) {

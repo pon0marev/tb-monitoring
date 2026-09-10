@@ -47,6 +47,7 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -121,6 +122,15 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         healthChecker.initialize();
         devices.add(target.getDeviceId());
         return healthChecker;
+    }
+
+    private List<BaseHealthChecker<C, T>> flattenHealthCheckers() {
+        List<BaseHealthChecker<C, T>> flattened = new ArrayList<>();
+        for (BaseHealthChecker<C, T> healthChecker : healthCheckers) {
+            flattened.add(healthChecker);
+            flattened.addAll(healthChecker.getAssociates().values());
+        }
+        return flattened;
     }
 
     public final void runChecks() {
