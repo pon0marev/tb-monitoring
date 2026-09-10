@@ -75,8 +75,8 @@ public class ThingsboardMonitoringApplication {
         for (int i = 0; i < monitoringServices.size(); i++) {
             int initialDelay = (monitoringRateMs / monitoringServices.size()) * i;
             BaseMonitoringService<?, ?> service = monitoringServices.get(i);
-            log.info("Scheduling initialDelay {}, fixedDelay {} for monitoring '{}' ", initialDelay, monitoringRateMs, service.getClass().getSimpleName());
-            scheduler.scheduleWithFixedDelay(service::runChecks, initialDelay, monitoringRateMs, TimeUnit.MILLISECONDS);
+            log.info("Scheduling initial delay {} for monitoring '{}' ", initialDelay, service.getClass().getSimpleName());
+            scheduler.schedule(service::runChecks, initialDelay, TimeUnit.MILLISECONDS);
         }
 
         String publicDashboardUrl = entityService.getDashboardPublicLink();
