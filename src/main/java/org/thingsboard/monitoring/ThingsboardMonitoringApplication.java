@@ -24,7 +24,6 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.scheduling.annotation.EnableScheduling;
-import org.thingsboard.common.util.ThingsBoardExecutors;
 import org.thingsboard.monitoring.data.notification.InfoNotification;
 import org.thingsboard.monitoring.notification.NotificationService;
 import org.thingsboard.monitoring.service.BaseMonitoringService;
@@ -52,7 +51,7 @@ public class ThingsboardMonitoringApplication {
     @Value("${monitoring.monitoring_rate_ms}")
     private int monitoringRateMs;
 
-    private final ScheduledExecutorService scheduler = ThingsBoardExecutors.newSingleThreadScheduledExecutor("monitoring");
+    private final ScheduledExecutorService scheduler;
 
     public static void main(String[] args) {
         // sun.net.httpserver.ServerConfig reads these once, on the JVM's first HttpServer use (the
