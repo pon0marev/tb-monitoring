@@ -27,7 +27,10 @@ public class MonitoringSchedulerConfig {
     // shared by ThingsboardMonitoringApplication (initial per-service kickoff) and
     // BaseMonitoringService (per-probe staggering + cycle-to-cycle recurrence) - one thread for
     // all monitoring scheduling, see AGENTS.md
-    @Bean
+    // destroyMethod = "" - ThingsboardMonitoringApplication.shutdownScheduler() already shuts this
+    // down explicitly; without this, Spring's inferred close() also runs and blocks app shutdown
+    // waiting for a pending cycle (up to monitoring_rate_ms out) to fire first
+    @Bean(destroyMethod = "")
     public ScheduledExecutorService monitoringScheduler() {
         return ThingsBoardExecutors.newSingleThreadScheduledExecutor("monitoring");
     }

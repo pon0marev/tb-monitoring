@@ -98,7 +98,10 @@ public class ThingsboardMonitoringApplication {
 
     @PreDestroy
     public void shutdownScheduler() {
-        scheduler.shutdown();
+        // shutdownNow(), not shutdown(): a pending scheduled cycle (up to monitoring_rate_ms out)
+        // firing mid-teardown would partially run against a half-shutdown app and both delay
+        // shutdown and report a bogus failure alert when its own scheduling call gets rejected
+        scheduler.shutdownNow();
     }
 
 }

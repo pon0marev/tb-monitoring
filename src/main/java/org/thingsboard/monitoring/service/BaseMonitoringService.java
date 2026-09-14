@@ -101,6 +101,11 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
     protected boolean checkCalculatedFields;
     @Value("${monitoring.monitoring_rate_ms}")
     private int monitoringRateMs;
+    // both anchor scheduleNextCycle()'s delay on when THIS cycle started rather than when it
+    // finishes - single-threaded scheduler, only one cycle in flight per service, so plain fields
+    // are safe. probeIntervalMs also doubles as the delay floor (see nextCycleDelayMs()).
+    private long cycleStartMs;
+    private long probeIntervalMs;
 
     public void init() {
         if (configs == null || configs.isEmpty()) {
@@ -139,6 +144,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
     }
 
     public final void runChecks() {
+        cycleStartMs = System.currentTimeMillis();
         if (healthCheckers.isEmpty()) {
             scheduleNextCycle();
             return;
@@ -194,14 +200,18 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
                 reporter.serviceFailure(MonitoredServiceKey.WS_SUBSCRIBE, e);
                 probeMetricsRecorder.removeActionDuration(MonitoredServiceKey.WS, ProbeMetricsRecorder.ACTION_SUBSCRIBE);
                 probeMetricsRecorder.recordProbe(MonitoredServiceKey.WS, false);
-                ws.close();
+                try {
+                    ws.close();
+                } catch (Exception closeError) {
+                    log.warn("Failed to close WS client for {}", getName(), closeError);
+                }
                 fallBackToAcceptedChecks();
                 return;
             }
 
             List<BaseHealthChecker<C, T>> flattened = flattenHealthCheckers();
-            long intervalMs = monitoringRateMs / flattened.size();
-            scheduleProbe(flattened, 0, ws, intervalMs);
+            probeIntervalMs = monitoringRateMs / flattened.size();
+            scheduleProbe(flattened, 0, ws, probeIntervalMs);
             chainStarted = true;
         } catch (Throwable error) {
             try {
@@ -223,13 +233,22 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         }
         scheduler.schedule(() -> {
             try {
-                checkOne(flattened.get(index), ws);
+                // an earlier entry's slot (e.g. a DNS reconciliation) may have already retired this
+                // one this same cycle - re-probing it would resurrect a gauge for a target that's gone
+                if (isLive(flattened.get(index))) {
+                    checkOne(flattened.get(index), ws);
+                }
             } catch (Throwable t) {
                 log.warn("[{}] Probe failed for {}", getName(), flattened.get(index).getCachedInfo(), t);
             } finally {
                 scheduleProbe(flattened, index + 1, ws, intervalMs);
             }
         }, index == 0 ? 0 : intervalMs, TimeUnit.MILLISECONDS);
+    }
+
+    private boolean isLive(BaseHealthChecker<C, T> healthChecker) {
+        return healthCheckers.contains(healthChecker) ||
+                healthCheckers.stream().anyMatch(top -> top.getAssociates().containsValue(healthChecker));
     }
 
     private void checkOne(BaseHealthChecker<C, T> healthChecker, WsClient ws) throws Exception {
@@ -289,7 +308,16 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
     }
 
     private void scheduleNextCycle() {
-        scheduler.schedule(this::runChecks, monitoringRateMs, TimeUnit.MILLISECONDS);
+        scheduler.schedule(this::runChecks, nextCycleDelayMs(), TimeUnit.MILLISECONDS);
+    }
+
+    // anchored on cycleStartMs (not "now") so a cycle whose probes consumed most of monitoringRateMs
+    // doesn't push the next cycle out to roughly 2x monitoringRateMs after this one started. The
+    // probeIntervalMs floor keeps at least one probe-interval of headroom so an overrunning cycle
+    // can't schedule the next one on top of a still-draining chain.
+    private long nextCycleDelayMs() {
+        long elapsedMs = System.currentTimeMillis() - cycleStartMs;
+        return Math.max(probeIntervalMs, monitoringRateMs - elapsedMs);
     }
 
     private record ReconciliationFailureKey(Object delegate) implements ShortNameProvider {

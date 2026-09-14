@@ -55,6 +55,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -74,6 +75,7 @@ public class BaseMonitoringServiceProbeMetricsTest {
     private WsClient wsClient;
     private BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> healthChecker;
     private Queue<Runnable> scheduledTasks;
+    private ScheduledExecutorService scheduler;
 
     @BeforeEach
     public void setUp() throws Exception {
@@ -92,7 +94,7 @@ public class BaseMonitoringServiceProbeMetricsTest {
         ReflectionTestUtils.setField(service, "stopWatch", new TbStopWatch());
         ReflectionTestUtils.setField(service, "dnsResolutionTimeoutMs", 5000L);
 
-        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        scheduler = mock(ScheduledExecutorService.class);
         scheduledTasks = new LinkedList<>();
         doAnswer(inv -> {
             scheduledTasks.add(inv.getArgument(0));
@@ -520,6 +522,10 @@ public class BaseMonitoringServiceProbeMetricsTest {
         verify(decommissioned).destroyClient();
         verify(current, never()).destroyClient();
         verify(healthChecker, never()).destroyClient();
+        // decommissioned's own flattened slot comes later this same cycle, after it's already been
+        // retired by healthChecker's reconciliation pass above - it must be skipped as no-longer-live,
+        // not re-probed (which would resurrect a probe_success gauge for a target that no longer exists)
+        verify(decommissioned, never()).check(any());
     }
 
     @Test
@@ -629,18 +635,29 @@ public class BaseMonitoringServiceProbeMetricsTest {
 
     @Test
     public void reconciliation_neverFiresForAFlattenedAssociateEntry() throws Exception {
+        // regression test: the parent's target actually has checkDomainIps(true) here (unlike the
+        // earlier version of this test, which had no entry with the flag set at all, so its "never"
+        // assertion passed trivially even with reconciliation completely broken)
+        TransportMonitoringTarget target = new TransportMonitoringTarget();
+        target.setCheckDomainIps(true);
+        target.setBaseUrl("tcp://127.0.0.1:1883"); // IP literal - deterministic, no real DNS lookup
+        when(healthChecker.getTarget()).thenReturn(target);
+
         BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> associate = mock(BaseHealthChecker.class);
         TransportMonitoringTarget associateTarget = new TransportMonitoringTarget();
         associateTarget.setCheckDomainIps(false);
         when(associate.getTarget()).thenReturn(associateTarget);
-        when(healthChecker.getAssociates()).thenReturn(Map.of("associate-url", associate));
+        Map<String, BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget>> associates = new HashMap<>();
+        associates.put("tcp://127.0.0.1:1883", associate); // matches what resolution finds - reconciliation sees no change
+        when(healthChecker.getAssociates()).thenReturn(associates);
 
         givenHealthyLoginAndWs();
 
         runChecksAndDrainProbes(2);
 
-        verify(associate).check(any());
-        verify(reporter, never()).serviceIsOk(argThat(key -> key.toString().endsWith("(DNS)")));
+        verify(associate).check(any()); // the associate DOES get its own separate probe slot now
+        // ... but reconciliation itself only ever fires from the parent's own slot, exactly once
+        verify(reporter, times(1)).serviceIsOk(argThat(key -> key.toString().endsWith("(DNS)")));
     }
 
     @Test
@@ -669,6 +686,33 @@ public class BaseMonitoringServiceProbeMetricsTest {
         runChecksAndDrainProbes(1);
 
         assertThat(scheduledTasks).hasSize(1); // only the next-cycle task remains, unrun
+    }
+
+    @Test
+    public void scheduleNextCycle_anchorsOnCycleStart_notCycleEnd() throws Exception {
+        // regression test: the next cycle's delay must be monitoringRateMs MINUS how long this cycle
+        // already took (floored at one probe-interval), not a flat monitoringRateMs measured from
+        // when the chain finishes - otherwise the effective period nearly doubles
+        BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> secondChecker = mock(BaseHealthChecker.class);
+        when(secondChecker.getTarget()).thenReturn(new TransportMonitoringTarget());
+        List<BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget>> healthCheckers =
+                (List) ReflectionTestUtils.getField(service, "healthCheckers");
+        healthCheckers.add(secondChecker); // 2 flattened entries -> probeIntervalMs = 60000 / 2 = 30000
+
+        givenHealthyLoginAndWs();
+        service.runChecks();
+
+        // simulate the chain having already consumed 20s of wall-clock time since the cycle started
+        ReflectionTestUtils.setField(service, "cycleStartMs", System.currentTimeMillis() - 20000);
+        scheduledTasks.poll().run(); // first probe
+        scheduledTasks.poll().run(); // second probe -> finishCycle() -> scheduleNextCycle()
+
+        ArgumentCaptor<Long> delayCaptor = ArgumentCaptor.forClass(Long.class);
+        verify(scheduler, atLeastOnce()).schedule(any(Runnable.class), delayCaptor.capture(), eq(TimeUnit.MILLISECONDS));
+        long nextCycleDelayMs = delayCaptor.getAllValues().get(delayCaptor.getAllValues().size() - 1);
+
+        assertThat(nextCycleDelayMs).isLessThan(50000L); // well under a flat 60000ms
+        assertThat(nextCycleDelayMs).isGreaterThanOrEqualTo(30000L); // never less than one probe-interval of headroom
     }
 
     @Test
@@ -763,7 +807,7 @@ public class BaseMonitoringServiceProbeMetricsTest {
     }
 
     @Test
-    public void flattenHealthCheckers_includesAssociatesRightAfterTheirParent() {
+    public void flattenHealthCheckers_includesAssociates() {
         BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> associate = mock(BaseHealthChecker.class);
         when(healthChecker.getAssociates()).thenReturn(Map.of("associate-url", associate));
 
