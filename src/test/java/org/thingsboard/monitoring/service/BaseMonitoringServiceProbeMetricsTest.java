@@ -759,6 +759,36 @@ public class BaseMonitoringServiceProbeMetricsTest {
     }
 
     @Test
+    public void scheduleNextCycle_schedulerThrows_isSwallowedNotPropagated() {
+        // unlike the scheduleWithFixedDelay() this replaced (whose periodic re-invocation didn't
+        // depend on anything the app itself does), a plain scheduler.schedule() call has no wrapper
+        // catching an escaping exception - left unguarded, a RejectedExecutionException racing
+        // shutdown (or any other failure at this exact call) would silently and permanently stop
+        // this service's monitoring, with nothing in the logs to show it
+        ScheduledExecutorService throwingScheduler = mock(ScheduledExecutorService.class);
+        doThrow(new java.util.concurrent.RejectedExecutionException("shutting down"))
+                .when(throwingScheduler).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+        ReflectionTestUtils.setField(service, "scheduler", throwingScheduler);
+
+        assertDoesNotThrow(() -> ReflectionTestUtils.invokeMethod(service, "scheduleNextCycle"));
+    }
+
+    @Test
+    public void chainKickoffFails_stillClosesWsClient() throws Exception {
+        // if scheduling the very first probe throws, finishCycle() (which normally closes ws) is
+        // never reached - nothing else on this path used to close the WS connection
+        givenHealthyLoginAndWs();
+        ScheduledExecutorService throwingScheduler = mock(ScheduledExecutorService.class);
+        doThrow(new java.util.concurrent.RejectedExecutionException("shutting down"))
+                .when(throwingScheduler).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
+        ReflectionTestUtils.setField(service, "scheduler", throwingScheduler);
+
+        assertDoesNotThrow(() -> service.runChecks());
+
+        verify(wsClient).close();
+    }
+
+    @Test
     public void getAssociatedUrls_resolvesIpLiteral_returnsSameAddress() {
         // sanity check that wrapping the DNS call in a bounded CompletableFuture (the timeout fix)
         // didn't change the successful-resolution result

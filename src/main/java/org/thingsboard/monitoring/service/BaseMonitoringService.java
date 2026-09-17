@@ -145,6 +145,9 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
 
     public final void runChecks() {
         cycleStartMs = System.currentTimeMillis();
+        // reset so a cycle that fails before ever computing a real value (login/WS-connect/WS-subscribe
+        // failure) doesn't apply a stale floor left over from a previous successful cycle's probe count
+        probeIntervalMs = 0;
         if (healthCheckers.isEmpty()) {
             scheduleNextCycle();
             return;
@@ -209,10 +212,21 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
                 return;
             }
 
-            List<BaseHealthChecker<C, T>> flattened = flattenHealthCheckers();
-            probeIntervalMs = monitoringRateMs / flattened.size();
-            scheduleProbe(flattened, 0, ws, probeIntervalMs);
-            chainStarted = true;
+            try {
+                List<BaseHealthChecker<C, T>> flattened = flattenHealthCheckers();
+                probeIntervalMs = monitoringRateMs / flattened.size();
+                scheduleProbe(flattened, 0, ws);
+                chainStarted = true;
+            } catch (Throwable t) {
+                // nothing past this point closes ws otherwise - finishCycle() (which normally does)
+                // is never reached if the chain never actually got kicked off
+                try {
+                    ws.close();
+                } catch (Exception closeError) {
+                    log.warn("Failed to close WS client for {}", getName(), closeError);
+                }
+                throw t;
+            }
         } catch (Throwable error) {
             try {
                 reporter.serviceFailure(MonitoredServiceKey.GENERAL, error);
@@ -226,7 +240,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         }
     }
 
-    private void scheduleProbe(List<BaseHealthChecker<C, T>> flattened, int index, WsClient ws, long intervalMs) {
+    private void scheduleProbe(List<BaseHealthChecker<C, T>> flattened, int index, WsClient ws) {
         if (index >= flattened.size()) {
             finishCycle(ws);
             return;
@@ -241,9 +255,27 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             } catch (Throwable t) {
                 log.warn("[{}] Probe failed for {}", getName(), flattened.get(index).getCachedInfo(), t);
             } finally {
-                scheduleProbe(flattened, index + 1, ws, intervalMs);
+                scheduleNextProbeOrFinish(flattened, index + 1, ws);
             }
-        }, index == 0 ? 0 : intervalMs, TimeUnit.MILLISECONDS);
+        }, index == 0 ? 0 : probeIntervalMs, TimeUnit.MILLISECONDS);
+    }
+
+    // scheduler.schedule() itself can throw (e.g. a RejectedExecutionException racing shutdown) - unlike
+    // the scheduleWithFixedDelay() this replaced, a plain schedule() has no wrapper that catches and
+    // logs an escaping exception, so left unguarded this would silently and permanently stop the chain
+    // (and, for the terminal step, this service's monitoring for good) with nothing in the logs to show it
+    private void scheduleNextProbeOrFinish(List<BaseHealthChecker<C, T>> flattened, int index, WsClient ws) {
+        try {
+            scheduleProbe(flattened, index, ws);
+        } catch (Throwable t) {
+            log.error("[{}] Failed to schedule the next step of the probe chain - closing early and retrying next cycle", getName(), t);
+            try {
+                ws.close();
+            } catch (Exception closeError) {
+                log.warn("Failed to close WS client for {}", getName(), closeError);
+            }
+            scheduleNextCycle();
+        }
     }
 
     private boolean isLive(BaseHealthChecker<C, T> healthChecker) {
@@ -307,8 +339,17 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         }
     }
 
+    // this is the terminal step of every cycle - unlike the scheduleWithFixedDelay() this replaced
+    // (whose periodic re-invocation didn't depend on anything we do), recurrence from here on is
+    // entirely our own responsibility, so an exception escaping this specific call (e.g. a
+    // RejectedExecutionException racing shutdown) must never be allowed to silently and permanently
+    // stop this service's monitoring with nothing in the logs to show it
     private void scheduleNextCycle() {
-        scheduler.schedule(this::runChecks, nextCycleDelayMs(), TimeUnit.MILLISECONDS);
+        try {
+            scheduler.schedule(this::runChecks, nextCycleDelayMs(), TimeUnit.MILLISECONDS);
+        } catch (Throwable t) {
+            log.error("[{}] Failed to schedule the next monitoring cycle - monitoring has stopped and needs a restart", getName(), t);
+        }
     }
 
     // anchored on cycleStartMs (not "now") so a cycle whose probes consumed most of monitoringRateMs
