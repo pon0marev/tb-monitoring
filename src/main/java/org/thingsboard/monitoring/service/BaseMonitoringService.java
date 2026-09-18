@@ -203,11 +203,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
                 reporter.serviceFailure(MonitoredServiceKey.WS_SUBSCRIBE, e);
                 probeMetricsRecorder.removeActionDuration(MonitoredServiceKey.WS, ProbeMetricsRecorder.ACTION_SUBSCRIBE);
                 probeMetricsRecorder.recordProbe(MonitoredServiceKey.WS, false);
-                try {
-                    ws.close();
-                } catch (Exception closeError) {
-                    log.warn("Failed to close WS client for {}", getName(), closeError);
-                }
+                closeQuietly(ws);
                 fallBackToAcceptedChecks();
                 return;
             }
@@ -220,11 +216,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             } catch (Throwable t) {
                 // nothing past this point closes ws otherwise - finishCycle() (which normally does)
                 // is never reached if the chain never actually got kicked off
-                try {
-                    ws.close();
-                } catch (Exception closeError) {
-                    log.warn("Failed to close WS client for {}", getName(), closeError);
-                }
+                closeQuietly(ws);
                 throw t;
             }
         } catch (Throwable error) {
@@ -269,23 +261,26 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             scheduleProbe(flattened, index, ws);
         } catch (Throwable t) {
             log.error("[{}] Failed to schedule the next step of the probe chain - closing early and retrying next cycle", getName(), t);
-            try {
-                ws.close();
-            } catch (Exception closeError) {
-                log.warn("Failed to close WS client for {}", getName(), closeError);
-            }
+            closeQuietly(ws);
             scheduleNextCycle();
         }
     }
 
+    private void closeQuietly(WsClient ws) {
+        try {
+            ws.close();
+        } catch (Exception e) {
+            log.warn("Failed to close WS client for {}", getName(), e);
+        }
+    }
+
     private boolean isLive(BaseHealthChecker<C, T> healthChecker) {
-        return healthCheckers.contains(healthChecker) ||
-                healthCheckers.stream().anyMatch(top -> top.getAssociates().containsValue(healthChecker));
+        return flattenHealthCheckers().contains(healthChecker);
     }
 
     private void checkOne(BaseHealthChecker<C, T> healthChecker, WsClient ws) throws Exception {
         healthChecker.check(ws);
-        clearAcceptedMetricsForOne(healthChecker);
+        probeMetricsRecorder.removeAcceptedProbe(healthChecker.getCachedInfo(), ProbeMetricsRecorder.Removal.STALE_THIS_CYCLE);
 
         T target = healthChecker.getTarget();
         if (target.isCheckDomainIps()) {
@@ -304,10 +299,6 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
                 log.warn("Failed to reconcile associate IPs for {}", target.getBaseUrl(), e);
             }
         }
-    }
-
-    private void clearAcceptedMetricsForOne(BaseHealthChecker<C, T> healthChecker) {
-        probeMetricsRecorder.removeAcceptedProbe(healthChecker.getCachedInfo(), ProbeMetricsRecorder.Removal.STALE_THIS_CYCLE);
     }
 
     private void finishCycle(WsClient ws) {
@@ -330,11 +321,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             reporter.serviceIsOk(MonitoredServiceKey.GENERAL);
             log.debug("Finished {}", getName());
         } finally {
-            try {
-                ws.close();
-            } catch (Exception e) {
-                log.warn("Failed to close WS client for {}", getName(), e);
-            }
+            closeQuietly(ws);
             scheduleNextCycle();
         }
     }

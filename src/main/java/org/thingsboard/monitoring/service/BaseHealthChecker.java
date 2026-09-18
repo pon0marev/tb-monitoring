@@ -87,8 +87,8 @@ public abstract class BaseHealthChecker<C extends MonitoringConfig, T extends Mo
             // a successful end-to-end check implies the transport accepted messages fine too - clear
             // any "(accepted)" failure state left over from an earlier login/WS outage, or it would
             // never recover on its own (checkAccepted() only runs again during the next outage) and
-            // its incident would stay open forever. Mirrors clearAcceptedMetricsForOne() on the
-            // metrics side.
+            // its incident would stay open forever. Mirrors the accepted-probe metric removal in
+            // BaseMonitoringService.checkOne().
             reporter.serviceIsOk(acceptedProbeKey());
             success = true;
         } catch (ServiceFailureException e) {
