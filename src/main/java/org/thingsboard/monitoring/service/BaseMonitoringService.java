@@ -16,6 +16,7 @@
 package org.thingsboard.monitoring.service;
 
 import com.google.common.collect.Sets;
+import jakarta.annotation.PreDestroy;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -65,6 +66,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -79,6 +81,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
     private List<C> configs;
     private final List<BaseHealthChecker<C, T>> healthCheckers = new LinkedList<>();
     private final List<UUID> devices = new LinkedList<>();
+    private final AtomicReference<WsClient> activeWs = new AtomicReference<>();
 
     @Autowired
     private TbClient tbClient;
@@ -181,6 +184,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             WsClient ws;
             try {
                 ws = wsClientFactory.createClient(accessToken);
+                activeWs.set(ws);
                 reporter.serviceIsOk(MonitoredServiceKey.WS_CONNECT);
             } catch (Exception e) {
                 reporter.serviceFailure(MonitoredServiceKey.WS_CONNECT, e);
@@ -209,6 +213,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             }
 
             try {
+                reporter.reportLatencies();
                 List<BaseHealthChecker<C, T>> flattened = flattenHealthCheckers();
                 probeIntervalMs = monitoringRateMs / flattened.size();
                 scheduleProbe(flattened, 0, ws);
@@ -266,7 +271,16 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         }
     }
 
+    @PreDestroy
+    private void closeActiveWs() {
+        WsClient ws = activeWs.getAndSet(null);
+        if (ws != null) {
+            closeQuietly(ws);
+        }
+    }
+
     private void closeQuietly(WsClient ws) {
+        activeWs.compareAndSet(ws, null);
         try {
             ws.close();
         } catch (Exception e) {

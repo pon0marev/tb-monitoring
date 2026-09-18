@@ -19,7 +19,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.springframework.context.annotation.CommonAnnotationBeanPostProcessor;
+import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.thingsboard.monitoring.MonitoringSchedulerConfig;
+import org.thingsboard.monitoring.ThingsboardMonitoringApplication;
 import org.thingsboard.monitoring.client.TbClient;
 import org.thingsboard.monitoring.client.WsClient;
 import org.thingsboard.monitoring.client.WsClientFactory;
@@ -27,7 +31,9 @@ import org.thingsboard.monitoring.config.transport.TransportMonitoringConfig;
 import org.thingsboard.monitoring.config.transport.TransportMonitoringTarget;
 import org.thingsboard.monitoring.data.MonitoredServiceKey;
 import org.thingsboard.monitoring.data.ServiceFailureException;
+import org.thingsboard.monitoring.data.notification.HighLatencyNotification;
 import org.thingsboard.monitoring.metrics.ProbeMetricsRecorder;
+import org.thingsboard.monitoring.notification.NotificationService;
 import org.thingsboard.monitoring.util.TbStopWatch;
 import org.thingsboard.server.common.data.id.DeviceId;
 import org.thingsboard.server.common.data.page.PageData;
@@ -855,6 +861,72 @@ public class BaseMonitoringServiceProbeMetricsTest {
         when(healthChecker.getAssociates()).thenReturn(Map.of("associate-url", associate));
 
         assertThat((List<?>) ReflectionTestUtils.invokeMethod(service, "flattenHealthCheckers")).hasSize(2);
+    }
+
+    @Test
+    public void shutdownBetweenProbes_closesOpenWs() throws Exception {
+        BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> secondChecker = mock(BaseHealthChecker.class);
+        when(secondChecker.getTarget()).thenReturn(new TransportMonitoringTarget());
+        ((List) ReflectionTestUtils.getField(service, "healthCheckers")).add(secondChecker);
+        givenHealthyLoginAndWs();
+        ScheduledExecutorService realScheduler = new MonitoringSchedulerConfig().monitoringScheduler();
+        ReflectionTestUtils.setField(service, "scheduler", realScheduler);
+        try (GenericApplicationContext context = new GenericApplicationContext()) {
+            context.getBeanFactory().addBeanPostProcessor(new CommonAnnotationBeanPostProcessor());
+            var app = new ThingsboardMonitoringApplication(List.of(service), mock(MonitoringEntityService.class),
+                    mock(PublicSharingService.class), mock(NotificationService.class), realScheduler);
+            context.registerBean("monitoringService", TestMonitoringService.class, () -> service);
+            context.registerBean("app", ThingsboardMonitoringApplication.class, () -> app);
+            context.refresh();
+            service.runChecks();
+            realScheduler.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            verify(healthChecker).check(wsClient);
+            verify(secondChecker, never()).check(any());
+            context.close();
+            assertThat(realScheduler.isShutdown()).isTrue();
+            verify(wsClient).close();
+        } finally {
+            realScheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    public void interleavedCycles_preserveHighLoginLatencyAlert() throws Exception {
+        givenHealthyLoginAndWs();
+        BaseHealthChecker<TransportMonitoringConfig, TransportMonitoringTarget> secondChecker = mock(BaseHealthChecker.class);
+        when(secondChecker.getTarget()).thenReturn(new TransportMonitoringTarget());
+        ((List) ReflectionTestUtils.getField(service, "healthCheckers")).add(secondChecker);
+        NotificationService notifications = mock(NotificationService.class);
+        MonitoringReporter sharedReporter = new MonitoringReporter(notifications, tbClient, mock(MonitoringEntityService.class));
+        ReflectionTestUtils.setField(sharedReporter, "latencyReportingEnabled", true);
+        ReflectionTestUtils.setField(sharedReporter, "latencyThresholdMs", 1000);
+        ReflectionTestUtils.setField(sharedReporter, "reportingAssetId", UUID.randomUUID().toString());
+        ReflectionTestUtils.setField(service, "reporter", sharedReporter);
+        TbStopWatch slowTimer = mock(TbStopWatch.class);
+        when(slowTimer.getTime()).thenReturn(2_000_000_000L, 5_000_000L);
+        ReflectionTestUtils.setField(service, "stopWatch", slowTimer);
+
+        TestMonitoringService secondService = new TestMonitoringService();
+        ReflectionTestUtils.setField(secondService, "tbClient", tbClient);
+        ReflectionTestUtils.setField(secondService, "wsClientFactory", wsClientFactory);
+        ReflectionTestUtils.setField(secondService, "reporter", sharedReporter);
+        ReflectionTestUtils.setField(secondService, "probeMetricsRecorder", probeMetricsRecorder);
+        ReflectionTestUtils.setField(secondService, "scheduler", scheduler);
+        ReflectionTestUtils.setField(secondService, "monitoringRateMs", 60000);
+        TbStopWatch fastTimer = mock(TbStopWatch.class);
+        when(fastTimer.getTime()).thenReturn(5_000_000L);
+        ReflectionTestUtils.setField(secondService, "stopWatch", fastTimer);
+        ((List) ReflectionTestUtils.getField(secondService, "healthCheckers")).add(healthChecker);
+
+        service.runChecks();
+        scheduledTasks.poll().run();
+        secondService.runChecks();
+        scheduledTasks.poll().run();
+        scheduledTasks.poll().run();
+
+        ArgumentCaptor<HighLatencyNotification> alertCaptor = ArgumentCaptor.forClass(HighLatencyNotification.class);
+        verify(notifications).sendNotification(alertCaptor.capture());
+        assertThat(alertCaptor.getValue().getText()).contains("logInLatency");
     }
 
     private static class TestMonitoringService extends BaseMonitoringService<TransportMonitoringConfig, TransportMonitoringTarget> {
