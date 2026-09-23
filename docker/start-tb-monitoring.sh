@@ -15,8 +15,9 @@
 # limitations under the License.
 #
 
-CONF_FILE=/usr/share/tb-monitoring/conf/tb-monitoring.conf
-LOGBACK_FILE=/usr/share/tb-monitoring/conf/logback.xml
+CONF_DIR="${TB_MONITORING_CONF_DIR:-/usr/share/tb-monitoring/conf}"
+CONF_FILE="$CONF_DIR/tb-monitoring.conf"
+LOGBACK_FILE="$CONF_DIR/logback.xml"
 
 # Absent outside the Helm chart (e.g. a bare `docker run`) - JAVA_OPTS/etc. then just come
 # from the container's own env, same as before this script existed.
