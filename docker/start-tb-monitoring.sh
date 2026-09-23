@@ -1,3 +1,4 @@
+#!/bin/bash
 #
 # Copyright © 2016-2026 The Thingsboard Authors
 #
@@ -14,15 +15,15 @@
 # limitations under the License.
 #
 
-# Build the jar first (from repo root): mvn package -DskipTests
-# Then: docker build -f docker/Dockerfile -t tb-monitoring .
-# Multi-arch (amd64/arm64) - the jar is pure JVM bytecode, only the base image needs both platforms:
-#   docker buildx build --platform linux/amd64,linux/arm64 -f docker/Dockerfile -t <repo>:tag --push .
+CONF_DIR="${TB_MONITORING_CONF_DIR:-/usr/share/tb-monitoring/conf}"
+CONF_FILE="$CONF_DIR/tb-monitoring.conf"
+LOGBACK_FILE="$CONF_DIR/logback.xml"
 
-FROM thingsboard/openjdk25:trixie-slim
+# Absent outside the Helm chart (e.g. a bare `docker run`) - JAVA_OPTS/etc. then just come
+# from the container's own env, same as before this script existed.
+[ -f "$CONF_FILE" ] && source "$CONF_FILE"
 
-COPY target/tb-monitoring-*.jar /app/tb-monitoring.jar
-COPY docker/start-tb-monitoring.sh /usr/bin/start-tb-monitoring.sh
-RUN chmod +x /usr/bin/start-tb-monitoring.sh
+LOGGING_OPT=""
+[ -f "$LOGBACK_FILE" ] && LOGGING_OPT="-Dlogging.config=$LOGBACK_FILE"
 
-ENTRYPOINT ["start-tb-monitoring.sh"]
+exec java $JAVA_OPTS $LOGGING_OPT -jar /app/tb-monitoring.jar
