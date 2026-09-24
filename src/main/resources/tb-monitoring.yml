@@ -24,14 +24,33 @@ monitoring:
   rest:
     # Base REST API url, https://DOMAIN by default
     base_url: '${REST_BASE_URL:https://${monitoring.domain}}'
-    # Authentication username
+    # LOGIN (default) - username/password. API_KEY - static key (monitoring.rest.api_key), use if
+    # the account has forced 2FA or password expiration that would otherwise false-alarm
+    # "login is down" (or block login outright). WS auth still needs a JWT - API_KEY mode gets one
+    # by impersonating itself via GET /api/user/{id}/token, which requires that endpoint's
+    # "token access" to be enabled for the account.
+    # Ignored (treated as API_KEY) whenever api_key below is non-blank, whichever way this is set.
+    auth_mode: '${REST_AUTH_MODE:LOGIN}'
+    # Authentication username (used unless api_key below is set)
     username: '${REST_AUTH_USERNAME:tenant@thingsboard.org}'
-    # Authentication password
+    # Authentication password (used unless api_key below is set)
     password: '${REST_AUTH_PASSWORD:tenant}'
+    # API key - create via POST /api/apiKey. Takes priority over LOGIN whenever set, regardless of auth_mode
+    api_key: '${REST_AUTH_API_KEY:}'
+    # API key description to match for expiry checks (auth_mode: API_KEY only). Optional - if
+    # unset, expiry monitoring is silently disabled. Must match the key's description exactly.
+    api_key_description: '${REST_AUTH_API_KEY_DESCRIPTION:}'
+    # Days before expiration to start daily warning notifications (auth_mode: API_KEY only)
+    api_key_expiry_warning_days: '${REST_AUTH_API_KEY_EXPIRY_WARNING_DAYS:7}'
+    # Delay before the first expiry check, in milliseconds (auth_mode: API_KEY only)
+    api_key_expiry_check_initial_delay_ms: '${REST_AUTH_API_KEY_EXPIRY_CHECK_INITIAL_DELAY_MS:60000}'
+    # Interval between expiry checks, in milliseconds (auth_mode: API_KEY only)
+    api_key_expiry_check_interval_ms: '${REST_AUTH_API_KEY_EXPIRY_CHECK_INTERVAL_MS:86400000}'
     # REST request timeout in milliseconds
     request_timeout_ms: '${REST_REQUEST_TIMEOUT_MS:5000}'
   ws:
-    # WebSocket url, wss://DOMAIN by default
+    # WebSocket url, wss://DOMAIN by default. Requires server ~3.6.2+ (uses the /api/ws GENERAL
+    # endpoint with message-based AuthCmd auth, no fallback to the old ?token= endpoint)
     base_url: '${WS_BASE_URL:wss://${monitoring.domain}}'
     # WebSocket request timeout
     request_timeout_ms: '${WS_REQUEST_TIMEOUT_MS:3000}'

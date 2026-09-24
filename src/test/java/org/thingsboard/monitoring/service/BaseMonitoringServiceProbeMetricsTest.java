@@ -101,24 +101,31 @@ public class BaseMonitoringServiceProbeMetricsTest {
     }
 
     private void givenHealthyLoginAndWs() throws Exception {
-        when(tbClient.logIn()).thenReturn("token");
+        when(tbClient.getWsCredential()).thenReturn("token");
         when(wsClientFactory.createClient("token")).thenReturn(wsClient);
         when(wsClient.waitForReply()).thenReturn(null);
     }
 
     private void givenLoginFails() throws Exception {
-        when(tbClient.logIn()).thenThrow(new RuntimeException("login failed"));
+        when(tbClient.getWsCredential()).thenThrow(new RuntimeException("login failed"));
     }
 
     private void givenWsConnectFails() throws Exception {
-        when(tbClient.logIn()).thenReturn("token");
+        when(tbClient.getWsCredential()).thenReturn("token");
         when(wsClientFactory.createClient("token")).thenThrow(new RuntimeException("connect failed"));
     }
 
     private void givenWsSubscribeFails() throws Exception {
-        when(tbClient.logIn()).thenReturn("token");
+        when(tbClient.getWsCredential()).thenReturn("token");
         when(wsClientFactory.createClient("token")).thenReturn(wsClient);
         when(wsClient.waitForReply()).thenThrow(new IllegalStateException("no reply"));
+    }
+
+    private void givenApiKeyMode() throws Exception {
+        when(tbClient.getAuthMode()).thenReturn(TbClient.AuthMode.API_KEY);
+        when(tbClient.getWsCredential()).thenReturn("impersonated-jwt");
+        when(wsClientFactory.createClient("impersonated-jwt")).thenReturn(wsClient);
+        when(wsClient.waitForReply()).thenReturn(null);
     }
 
     @Test
@@ -154,6 +161,20 @@ public class BaseMonitoringServiceProbeMetricsTest {
         service.runChecks();
 
         verify(probeMetricsRecorder, never()).recordActionDuration(eq(MonitoredServiceKey.WS), eq("connect"), anyLong());
+    }
+
+    @Test
+    public void apiKeyMode_wsProceedsNormallyUsingImpersonatedJwt() throws Exception {
+        // TbClient#getWsCredential() already resolves API_KEY mode down to a real JWT (via
+        // impersonation - the server has no WS-level api key support) - from here on it's the
+        // same WS flow as LOGIN mode, just reported under API_KEY_CHECK instead of LOGIN
+        givenApiKeyMode();
+
+        service.runChecks();
+
+        verify(wsClientFactory).createClient("impersonated-jwt");
+        verify(probeMetricsRecorder).recordProbe(eq(MonitoredServiceKey.API_KEY_CHECK), eq(true));
+        verify(probeMetricsRecorder).recordProbe(eq(MonitoredServiceKey.WS), eq(true));
     }
 
     @Test

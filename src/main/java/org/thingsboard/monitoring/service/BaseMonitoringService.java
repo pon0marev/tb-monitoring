@@ -135,31 +135,33 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
             probeMetricsRecorder.startCycle();
             probeMetricsRecorder.recordHeartbeat();
 
-            String accessToken;
+            boolean apiKeyMode = tbClient.getAuthMode() == TbClient.AuthMode.API_KEY;
+            String loginServiceKey = apiKeyMode ? MonitoredServiceKey.API_KEY_CHECK : MonitoredServiceKey.LOGIN;
+            String wsCredential;
             boolean loginSuccess = false;
             try {
                 stopWatch.start();
-                accessToken = tbClient.logIn();
+                wsCredential = tbClient.getWsCredential();
                 long loginLatencyNanos = stopWatch.getTime();
-                reporter.reportLatency(Latencies.LOG_IN, loginLatencyNanos);
-                probeMetricsRecorder.recordActionDuration(MonitoredServiceKey.LOGIN, ProbeMetricsRecorder.ACTION_REQUEST, loginLatencyNanos);
-                reporter.serviceIsOk(MonitoredServiceKey.LOGIN);
+                reporter.reportLatency(apiKeyMode ? Latencies.API_KEY_CHECK : Latencies.LOG_IN, loginLatencyNanos);
+                probeMetricsRecorder.recordActionDuration(loginServiceKey, ProbeMetricsRecorder.ACTION_REQUEST, loginLatencyNanos);
+                reporter.serviceIsOk(loginServiceKey);
                 loginSuccess = true;
             } catch (Exception e) {
-                reporter.serviceFailure(MonitoredServiceKey.LOGIN, e);
-                probeMetricsRecorder.removeActionDuration(MonitoredServiceKey.LOGIN, ProbeMetricsRecorder.ACTION_REQUEST);
+                reporter.serviceFailure(loginServiceKey, e);
+                probeMetricsRecorder.removeActionDuration(loginServiceKey, ProbeMetricsRecorder.ACTION_REQUEST);
                 // WS and transport checks never ran this cycle - clear their gauges instead of
                 // leaving last cycle's value stale, then fall back to the WS-independent signal
                 probeMetricsRecorder.removeProbe(MonitoredServiceKey.WS, ProbeMetricsRecorder.Removal.STALE_THIS_CYCLE);
                 fallBackToAcceptedChecks();
                 return;
             } finally {
-                probeMetricsRecorder.recordProbe(MonitoredServiceKey.LOGIN, loginSuccess);
+                probeMetricsRecorder.recordProbe(loginServiceKey, loginSuccess);
             }
 
             WsClient wsClient;
             try {
-                wsClient = wsClientFactory.createClient(accessToken);
+                wsClient = wsClientFactory.createClient(wsCredential);
                 reporter.serviceIsOk(MonitoredServiceKey.WS_CONNECT);
             } catch (Exception e) {
                 reporter.serviceFailure(MonitoredServiceKey.WS_CONNECT, e);

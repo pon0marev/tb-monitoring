@@ -19,21 +19,37 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import org.thingsboard.common.util.JacksonUtil;
+import org.thingsboard.server.common.data.User;
 import org.thingsboard.server.common.data.id.AssetId;
+import org.thingsboard.server.common.data.id.UserId;
 
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 // Pins down TbClient.getEdition()'s own parsing/mapping logic - PublicSharingServiceTest only
 // stubs this method, so the actual "type" field parsing is otherwise untested. The inherited
@@ -47,9 +63,17 @@ class TbClientTest {
     private TbClient tbClient;
     private RestTemplate restTemplate;
 
+    private static TbClient newClient(TbClient.AuthMode authMode, String apiKey, String username, String password) {
+        return new TbClient("http://example.com", 5000, authMode, apiKey, username, password);
+    }
+
+    private static TbClient newClient(TbClient.AuthMode authMode, String apiKey) {
+        return newClient(authMode, apiKey, "", "");
+    }
+
     @BeforeEach
     void setUp() {
-        tbClient = new TbClient("http://example.com", 5000);
+        tbClient = newClient(TbClient.AuthMode.LOGIN, "", "tenant@thingsboard.org", "tenant");
         restTemplate = mock(RestTemplate.class);
         ReflectionTestUtils.setField(tbClient, "restTemplate", restTemplate);
     }
@@ -120,6 +144,101 @@ class TbClientTest {
 
         assertThatThrownBy(() -> tbClient.assignAssetToPublicCustomer(new AssetId(UUID.randomUUID())))
                 .isInstanceOf(HttpClientErrorException.class);
+    }
+
+    @Test
+    void loginMode_getWsCredentialCallsUsernamePasswordLogin() {
+        TbClient client = spy(newClient(TbClient.AuthMode.LOGIN, "", "tenant@thingsboard.org", "tenant"));
+        doReturn("jwt-token").when(client).getToken();
+        doNothing().when(client).login("tenant@thingsboard.org", "tenant");
+
+        String result = client.getWsCredential();
+
+        verify(client).login("tenant@thingsboard.org", "tenant");
+        assertThat(result).isEqualTo("jwt-token");
+    }
+
+    @Test
+    void apiKeyMode_getWsCredentialImpersonatesSelfForJwtNotLogin() {
+        TbClient client = spy(newClient(TbClient.AuthMode.API_KEY, "my-api-key"));
+        User user = mock(User.class);
+        UserId userId = new UserId(UUID.randomUUID());
+        doReturn(userId).when(user).getId();
+        doReturn(Optional.of(user)).when(client).getUser();
+        doReturn(Optional.of(JacksonUtil.toJsonNode("{\"token\": \"impersonated-jwt\"}"))).when(client).getUserToken(userId);
+
+        String result = client.getWsCredential();
+
+        verify(client, never()).login(anyString(), anyString());
+        verify(client).getUser();
+        verify(client).getUserToken(userId);
+        assertThat(result).isEqualTo("impersonated-jwt");
+    }
+
+    @Test
+    void apiKeyMode_getUserReturnsEmpty_getWsCredentialThrows() {
+        TbClient client = spy(newClient(TbClient.AuthMode.API_KEY, "my-api-key"));
+        doReturn(Optional.empty()).when(client).getUser();
+
+        assertThatIllegalStateException().isThrownBy(client::getWsCredential);
+    }
+
+    @Test
+    void apiKeyMode_getUserThrowsHttpError_getWsCredentialPropagates() {
+        TbClient client = spy(newClient(TbClient.AuthMode.API_KEY, "my-api-key"));
+        HttpClientErrorException httpError = HttpClientErrorException.create(HttpStatus.UNAUTHORIZED, "Unauthorized", null, null, null);
+        doThrow(httpError).when(client).getUser();
+
+        assertThatThrownBy(client::getWsCredential).isSameAs(httpError);
+    }
+
+    @Test
+    void apiKeyMode_getUserTokenReturnsEmpty_getWsCredentialThrows() {
+        TbClient client = spy(newClient(TbClient.AuthMode.API_KEY, "my-api-key"));
+        doReturn(Optional.of(mock(User.class))).when(client).getUser();
+        doReturn(Optional.empty()).when(client).getUserToken(any());
+
+        assertThatIllegalStateException().isThrownBy(client::getWsCredential);
+    }
+
+    @Test
+    void apiKeyPresent_overridesAuthModeLogin() {
+        TbClient client = newClient(TbClient.AuthMode.LOGIN, "my-api-key", "tenant@thingsboard.org", "tenant");
+
+        assertThat(client.getAuthMode()).isEqualTo(TbClient.AuthMode.API_KEY);
+    }
+
+    @Test
+    void apiKeyMode_blankApiKey_constructorThrows() {
+        assertThatIllegalStateException().isThrownBy(() -> newClient(TbClient.AuthMode.API_KEY, ""));
+    }
+
+    @Test
+    void loginMode_blankUsername_constructorThrows() {
+        assertThatIllegalStateException().isThrownBy(() -> newClient(TbClient.AuthMode.LOGIN, "", "", "tenant"));
+    }
+
+    @Test
+    void loginMode_blankPassword_constructorThrows() {
+        assertThatIllegalStateException().isThrownBy(() -> newClient(TbClient.AuthMode.LOGIN, "", "tenant@thingsboard.org", ""));
+    }
+
+    @Test
+    void apiKeyMode_getWsCredential_authenticatesWithApiKeyAndReturnsImpersonatedJwt() {
+        TbClient client = newClient(TbClient.AuthMode.API_KEY, "my-api-key");
+        MockRestServiceServer server = MockRestServiceServer.createServer(client.getRestTemplate());
+        UUID userId = UUID.randomUUID();
+        server.expect(requestTo("http://example.com/api/auth/user"))
+                .andExpect(header("X-Authorization", "ApiKey my-api-key"))
+                .andRespond(withSuccess("{\"id\":{\"entityType\":\"USER\",\"id\":\"" + userId + "\"}}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://example.com/api/user/" + userId + "/token"))
+                .andExpect(header("X-Authorization", "ApiKey my-api-key"))
+                .andRespond(withSuccess("{\"token\":\"impersonated-jwt\"}", MediaType.APPLICATION_JSON));
+
+        String result = client.getWsCredential();
+
+        assertThat(result).isEqualTo("impersonated-jwt");
+        server.verify();
     }
 
 }

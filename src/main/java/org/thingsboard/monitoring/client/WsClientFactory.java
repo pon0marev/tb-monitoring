@@ -42,8 +42,8 @@ public class WsClientFactory {
     @Value("${monitoring.ws.request_timeout_ms}")
     private int requestTimeoutMs;
 
-    public WsClient createClient(String accessToken) throws Exception {
-        URI uri = new URI(baseUrl + "/api/ws/plugins/telemetry?token=" + accessToken);
+    public WsClient createClient(String token) throws Exception {
+        URI uri = new URI(baseUrl + "/api/ws");
         stopWatch.start();
         WsClient wsClient = new WsClient(uri, requestTimeoutMs);
         if (baseUrl.startsWith("wss")) {
@@ -55,6 +55,7 @@ public class WsClientFactory {
         if (!connected) {
             throw new IllegalStateException("Failed to establish WS session");
         }
+        wsClient.authenticate(token);
         // TbStopWatch.getTime() stops/resets internally, so it can only be called once here -
         // reuse the same value for both the latency report and the probe metric
         long connectLatencyNanos = stopWatch.getTime();

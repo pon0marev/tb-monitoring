@@ -18,12 +18,14 @@ package org.thingsboard.monitoring.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.thingsboard.monitoring.util.RestTemplateUtils;
 import org.thingsboard.rest.client.RestClient;
+import org.thingsboard.server.common.data.User;
 import org.thingsboard.server.common.data.id.AssetId;
 import org.thingsboard.server.common.data.id.DashboardId;
 
@@ -34,22 +36,62 @@ import java.util.UUID;
 @Slf4j
 public class TbClient extends RestClient {
 
-    @Value("${monitoring.rest.username}")
-    private String username;
-    @Value("${monitoring.rest.password}")
-    private String password;
+    public enum AuthMode {LOGIN, API_KEY}
+
+    private final AuthMode authMode;
+    private final String apiKey;
+    private final String username;
+    private final String password;
 
     public TbClient(@Value("${monitoring.rest.base_url}") String baseUrl,
-                    @Value("${monitoring.rest.request_timeout_ms}") int requestTimeoutMs) {
-        super(RestTemplateUtils.build(requestTimeoutMs), baseUrl);
+                    @Value("${monitoring.rest.request_timeout_ms}") int requestTimeoutMs,
+                    @Value("${monitoring.rest.auth_mode:LOGIN}") AuthMode authMode,
+                    @Value("${monitoring.rest.api_key:}") String apiKey,
+                    @Value("${monitoring.rest.username:}") String username,
+                    @Value("${monitoring.rest.password:}") String password) {
+        // an api_key takes priority over auth_mode: LOGIN whenever both happen to be configured -
+        // no need to also flip auth_mode to API_KEY by hand
+        super(RestTemplateUtils.build(requestTimeoutMs), baseUrl,
+                StringUtils.isNotBlank(apiKey) ? AuthType.API_KEY : AuthType.JWT,
+                StringUtils.isNotBlank(apiKey) ? apiKey : null);
+        this.authMode = StringUtils.isNotBlank(apiKey) ? AuthMode.API_KEY : authMode;
+        this.apiKey = apiKey;
+        this.username = username;
+        this.password = password;
+        if (this.authMode == AuthMode.API_KEY && StringUtils.isBlank(apiKey)) {
+            throw new IllegalStateException("monitoring.rest.api_key must be set when monitoring.rest.auth_mode is API_KEY");
+        }
+        if (this.authMode == AuthMode.LOGIN && (StringUtils.isBlank(username) || StringUtils.isBlank(password))) {
+            throw new IllegalStateException("monitoring.rest.username and monitoring.rest.password must be set when monitoring.rest.auth_mode is LOGIN");
+        }
+        log.info("Starting TbClient with auth mode: {}", this.authMode);
     }
 
     @PostConstruct
     private void init() {
-        logIn();
+        getWsCredential();
     }
 
-    public String logIn() {
+    public AuthMode getAuthMode() {
+        return authMode;
+    }
+
+    // returns a JWT for WsClient#authenticate - the server only accepts a token there, not an api
+    // key (see AuthCmd), so in API_KEY mode this impersonates ourselves via the already-established
+    // api key session to mint one, instead of a real username/password login - which is exactly what
+    // API_KEY mode exists to avoid (e.g. when the account has forced 2FA or password expiration)
+    public String getWsCredential() {
+        if (authMode == AuthMode.API_KEY) {
+            Optional<User> user = getUser();
+            if (user.isEmpty()) {
+                throw new IllegalStateException("API key authentication failed - no user returned");
+            }
+            Optional<JsonNode> tokenInfo = getUserToken(user.get().getId());
+            if (tokenInfo.isEmpty()) {
+                throw new IllegalStateException("Failed to obtain a WS token for the API key user - check that token access is enabled for it");
+            }
+            return tokenInfo.get().get("token").asText();
+        }
         login(username, password);
         return getToken();
     }
